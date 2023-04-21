@@ -312,7 +312,7 @@ class RelativeSelfAttention(nn.Module):
         # Perform final projection and dropout
         output = self.proj(output)
         output = self.proj_drop(output)
-        return output
+        return output, attn
 
 
 class MaxViTTransformerBlock(nn.Module):
@@ -381,7 +381,7 @@ class MaxViTTransformerBlock(nn.Module):
             drop=drop
         )
 
-    def forward(self, input: torch.Tensor) -> torch.Tensor:
+    def forward(self, input: torch.Tensor, return_attention: bool = False) -> torch.Tensor:
         """ Forward pass.
 
         Args:
@@ -395,8 +395,14 @@ class MaxViTTransformerBlock(nn.Module):
         # Perform partition
         input_partitioned = self.partition_function(input, self.grid_window_size)
         input_partitioned = input_partitioned.view(-1, self.grid_window_size[0] * self.grid_window_size[1], C)
+
+        out, attn = self.attention(self.norm_1(input_partitioned))
+
+        if return_attention:
+            return attn
+
         # Perform normalization, attention, and dropout
-        output = input_partitioned + self.drop_path(self.attention(self.norm_1(input_partitioned)))
+        output = input_partitioned + self.drop_path(out)
         # Perform normalization, MLP, and dropout
         output = output + self.drop_path(self.mlp(self.norm_2(output)))
         # Reverse partition
@@ -477,7 +483,7 @@ class MaxViTBlock(nn.Module):
             norm_layer=norm_layer_transformer
         )
 
-    def forward(self, input: torch.Tensor) -> torch.Tensor:
+    def forward(self, input: torch.Tensor, return_attention: bool = False) -> torch.Tensor:
         """ Forward pass.
 
         Args:
@@ -486,7 +492,7 @@ class MaxViTBlock(nn.Module):
         Returns:
             output (torch.Tensor): Output tensor of the shape [B, C_out, H // 2, W // 2] (downscaling is optional)
         """
-        output = self.grid_transformer(self.block_transformer(self.mb_conv(input)))
+        output = self.grid_transformer(self.block_transformer(self.mb_conv(input)), return_attention=return_attention)
         return output
 
 
@@ -527,7 +533,7 @@ class MaxViTStage(nn.Module):
         # Call super constructor
         super(MaxViTStage, self).__init__()
         # Init blocks
-        self.blocks = nn.Sequential(*[
+        self.blocks = nn.ModuleList([
             MaxViTBlock(
                 in_channels=in_channels if index == 0 else out_channels,
                 out_channels=out_channels,
@@ -545,7 +551,7 @@ class MaxViTStage(nn.Module):
             for index in range(depth)
         ])
 
-    def forward(self, input=torch.Tensor) -> torch.Tensor:
+    def forward(self, input=torch.Tensor, return_attention: bool = False) -> torch.Tensor:
         """ Forward pass.
 
         Args:
@@ -554,8 +560,13 @@ class MaxViTStage(nn.Module):
         Returns:
             output (torch.Tensor): Output tensor of the shape [B, C_out, H // 2, W // 2].
         """
-        output = self.blocks(input)
-        return output
+        for i, layer in enumerate(self.blocks):
+            if (i == len(self.blocks) - 1) & return_attention:
+                input, attn = layer(input, return_attention)
+                return attn
+            else:
+                input = layer(input)
+        return input
 
 
 class MaxViT(nn.Module):
